@@ -90,7 +90,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'USB/SD Flasher',
+      title: 'OpenUSB V1',
       theme: ThemeData(
         primarySwatch: Colors.blue,
         visualDensity: VisualDensity.adaptivePlatformDensity,
@@ -333,7 +333,7 @@ class _FlashHomePageState extends State<FlashHomePage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      "ISO to USB/SD Flasher",
+                      "OpenUSB V1",
                       style: TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
