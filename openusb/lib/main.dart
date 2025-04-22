@@ -309,7 +309,7 @@ class _FlashHomePageState extends State<FlashHomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('USB/SD Flasher'),
+        title: const Text('OpenUSB V1'),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
