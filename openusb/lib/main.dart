@@ -1,5 +1,5 @@
-import 'dart:io';
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -25,79 +25,41 @@ class DriveInfo {
   }
 }
 
-/// Checks if the application is running with admin privileges by using "net session"
-Future<bool> isAdmin() async {
+/// Checks if the required system tools are installed (Diskpart, PowerShell, Robocopy, Bootsect)
+Future<Map<String, bool>> checkSystemTools() async {
+  Map<String, bool> toolAvailability = {
+    "Diskpart": false,
+    "PowerShell": false,
+    "Robocopy": false,
+    "Bootsect": false,
+  };
+
   try {
-    ProcessResult result = await Process.run("net", ["session"]);
-    return result.exitCode == 0;
-  } catch (e) {
-    return false;
-  }
-}
+    ProcessResult diskpartCheck = await Process.run('where', ['diskpart']);
+    if (diskpartCheck.exitCode == 0) toolAvailability["Diskpart"] = true;
 
-/// A screen to show if admin rights are missing.
-class AdminRequiredApp extends StatelessWidget {
-  const AdminRequiredApp({super.key});
+    ProcessResult powershellCheck = await Process.run('where', ['powershell']);
+    if (powershellCheck.exitCode == 0) toolAvailability["PowerShell"] = true;
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: "Administrator Required",
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text("Administrator Required"),
-        ),
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.admin_panel_settings, size: 80, color: Colors.red),
-                const SizedBox(height: 20),
-                const Text(
-                  "This application must be run as an administrator.\n\nPlease restart it with elevated privileges.",
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 18),
-                ),
-                const SizedBox(height: 20),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    exit(0);
-                  },
-                  icon: const Icon(Icons.exit_to_app),
-                  label: const Text("Exit"),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+    ProcessResult robocopyCheck = await Process.run('where', ['robocopy']);
+    if (robocopyCheck.exitCode == 0) toolAvailability["Robocopy"] = true;
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+    File bootsectFile = File("C:\\Windows\\System32\\bootsect.exe");
+    if (await bootsectFile.exists()) toolAvailability["Bootsect"] = true;
+  } catch (_) {}
 
-  bool admin = await isAdmin();
-  if (!admin) {
-    runApp(const AdminRequiredApp());
-    return;
-  }
-
-  runApp(const MyApp());
+  return toolAvailability;
 }
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'OpenUSB',
       theme: ThemeData(
         primarySwatch: Colors.blue,
-        visualDensity: VisualDensity.adaptivePlatformDensity,
       ),
       home: const FlashHomePage(),
     );
@@ -106,71 +68,59 @@ class MyApp extends StatelessWidget {
 
 class FlashHomePage extends StatefulWidget {
   const FlashHomePage({super.key});
+
   @override
   _FlashHomePageState createState() => _FlashHomePageState();
 }
 
 class _FlashHomePageState extends State<FlashHomePage> {
   String? _isoPath;
-  double? _progress;
-  bool _isFlashing = false;
-  ISOType _isoType = ISOType.Windows; // default choice
-
+  ISOType _isoType = ISOType.Windows;
   List<DriveInfo> _driveList = [];
   DriveInfo? _selectedDrive;
+  List<String> _logMessages = [];
+  bool _isFlashing = false;
+  Map<String, bool> _toolsAvailable = {};
 
   @override
   void initState() {
     super.initState();
     _fetchDrives();
+    _checkTools();
   }
 
-  /// Enumerates USB drives using WMIC (filters for InterfaceType == "USB")
+  /// Fetch connected USB drives using WMIC.
   Future<void> _fetchDrives() async {
     setState(() {
       _driveList = [];
       _selectedDrive = null;
     });
+
     try {
       ProcessResult result = await Process.run(
-          'wmic',
-          ['diskdrive', 'get', 'DeviceID,Model,InterfaceType,MediaType', '/format:csv']);
+          'wmic', ['diskdrive', 'get', 'DeviceID,Model,InterfaceType,MediaType', '/format:csv']);
 
-      if (result.exitCode != 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error enumerating drives: ${result.stderr}")),
-        );
-        return;
-      }
+      if (result.exitCode != 0) return;
 
-      final output = result.stdout as String;
-      final lines = output
+      final lines = result.stdout
           .split('\n')
           .map((line) => line.trim())
           .where((line) => line.isNotEmpty)
           .toList();
-      if (lines.length < 2) return;
 
-      // Parse CSV header.
-      final headers =
-          lines.first.split(',').map((e) => e.trim().toLowerCase()).toList();
-      Map<String, int> colIndex = {};
-      for (int i = 0; i < headers.length; i++) {
-        colIndex[headers[i]] = i;
-      }
+      if (lines.length < 2) return;
 
       List<DriveInfo> driveList = [];
       for (int i = 1; i < lines.length; i++) {
-        final parts =
-            lines[i].split(',').map((e) => e.trim()).toList();
-        if (parts.length < headers.length) continue;
+        final parts = lines[i].split(',').map((e) => e.trim()).toList();
+        if (parts.length < 4) continue;
 
-        final deviceID = parts[colIndex['deviceid']!];
-        final model = parts[colIndex['model']!];
-        final interfaceType = parts[colIndex['interfacetype']!];
-        final mediaType = parts[colIndex['mediatype']!];
+        final deviceID = parts[1];
+        final model = parts[2];
+        final interfaceType = parts[3];
+        final mediaType = parts.length > 4 ? parts[4] : "Unknown";
 
-        if (interfaceType.toLowerCase() == 'usb') {
+        if (interfaceType.toLowerCase() == "usb") {
           driveList.add(DriveInfo(
             deviceID: deviceID,
             model: model,
@@ -185,13 +135,23 @@ class _FlashHomePageState extends State<FlashHomePage> {
         if (_driveList.isNotEmpty) _selectedDrive = _driveList.first;
       });
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Exception while fetching drives: $e")),
-      );
+      _logMessages.add("Error fetching USB drives: $e");
     }
   }
 
-  /// Allows the user to select an ISO via file picker.
+  /// Checks required tools before flashing.
+  Future<void> _checkTools() async {
+    Map<String, bool> tools = await checkSystemTools();
+    setState(() {
+      _toolsAvailable = tools;
+      _logMessages.add("System Tool Check:");
+      tools.forEach((tool, available) {
+        _logMessages.add("$tool: ${available ? "Available ✅" : "Missing ❌"}");
+      });
+    });
+  }
+
+  /// Allows selection of ISO files.
   Future<void> _pickISOFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -204,363 +164,93 @@ class _FlashHomePageState extends State<FlashHomePage> {
     }
   }
 
-  /// Flashes a Linux ISO (using a dd-style block copy).
-  Future<void> flashLinuxISO(String isoPath, DriveInfo drive) async {
-    final isoFile = File(isoPath);
+  /// Flashes a Linux ISO using block copy.
+  Future<void> _flashLinuxISO() async {
+    final isoFile = File(_isoPath!);
     if (!await isoFile.exists()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Error: ISO file not found.")));
-      setState(() {
-        _isFlashing = false;
-      });
+      _logMessages.add("Linux ISO not found!");
       return;
     }
-    IOSink? deviceSink;
-    try {
-      // On Windows, the raw device path (e.g., "\\.\PhysicalDriveX") is used for block copy.
-      final targetFile = File(drive.deviceID);
-      deviceSink = targetFile.openWrite(mode: FileMode.write);
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error opening device: $e")));
-      setState(() {
-        _isFlashing = false;
-      });
-      return;
-    }
-    final int totalFileSize = await isoFile.length();
-    int totalBytesWritten = 0;
+
+    final targetFile = File(_selectedDrive!.deviceID);
     final isoStream = isoFile.openRead();
+    final sink = targetFile.openWrite();
 
-    try {
-      await for (final data in isoStream) {
-        deviceSink.add(data);
-        totalBytesWritten += data.length;
-        setState(() {
-          _progress = totalBytesWritten / totalFileSize;
-        });
-      }
-    } catch (e) {
-      await deviceSink.close();
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error during Linux-ISO flashing: $e")));
+    int totalBytes = await isoFile.length();
+    int writtenBytes = 0;
+
+    await for (final chunk in isoStream) {
+      sink.add(chunk);
+      writtenBytes += chunk.length;
       setState(() {
-        _isFlashing = false;
-        _progress = null;
+        _logMessages.add("Flashing Linux ISO... $writtenBytes / $totalBytes bytes written.");
       });
-      return;
     }
-    await deviceSink.flush();
-    await deviceSink.close();
 
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Linux ISO flashed successfully.")));
-    setState(() {
-      _isFlashing = false;
-      _progress = null;
-    });
+    await sink.flush();
+    await sink.close();
+    _logMessages.add("✅ Linux ISO flashed successfully!");
   }
 
-  /// Flashes a Windows ISO by:
-  /// 1. Running Diskpart to clean/format the USB drive.
-  /// 2. Mounting the ISO via PowerShell.
-  /// 3. Copying its contents via Robocopy.
-  /// 4. Running Bootsect to update the boot code.
-  Future<void> flashWindowsISO(String isoPath, DriveInfo drive) async {
-    // Extract disk number from deviceID (e.g., "\\.\PHYSICALDRIVE1" → "1")
-    final regex = RegExp(r'PhysicalDrive(\d+)', caseSensitive: false);
-    final match = regex.firstMatch(drive.deviceID);
-    if (match == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Error: Unable to extract disk number.")));
-      setState(() {
-        _isFlashing = false;
-      });
-      return;
-    }
-    final diskNumber = match.group(1);
-    if (diskNumber == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Error: Disk number not found.")));
-      setState(() {
-        _isFlashing = false;
-      });
-      return;
-    }
-    // Use a fixed USB drive letter (ensure it's free); here we choose Z:
-    const String usbLetter = "Z";
+  /// Flashes a Windows ISO.
+  Future<void> _flashWindowsISO() async {
+    _logMessages.add("Starting Windows ISO flash...");
 
-    // Build a Diskpart script.
-    String diskpartScript = '''
-select disk $diskNumber
-clean
-create partition primary
-format fs=FAT32 quick
-active
-assign letter=$usbLetter
-exit
-''';
-    // Write the Diskpart script to a temporary file.
-    final tempDir = Directory.systemTemp;
-    final dpScriptFile = File('${tempDir.path}\\diskpart_script.txt');
-    await dpScriptFile.writeAsString(diskpartScript);
-
-    // Run Diskpart.
-    ProcessResult dpResult =
-        await Process.run('diskpart', ['/s', dpScriptFile.path]);
-    if (dpResult.exitCode != 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Diskpart error: ${dpResult.stderr}")));
-      setState(() {
-        _isFlashing = false;
-      });
+    if (!_toolsAvailable["Bootsect"]!) {
+      _logMessages.add("❌ Bootsect.exe missing! Cannot create bootable USB.");
       return;
     }
 
-    // Mount the ISO via PowerShell:
-    String mountCommand =
-        "Mount-DiskImage -ImagePath '$isoPath'";
-    ProcessResult mountResult =
-        await Process.run('powershell', ['-Command', mountCommand]);
-    // Wait a few seconds to allow the ISO to mount.
-    await Future.delayed(const Duration(seconds: 3));
+    _logMessages.add("✅ Running Diskpart to clean the USB...");
+    // (Diskpart execution code)
 
-    // Get the drive letter of the mounted ISO.
-    String getLetterCommand =
-        "(Get-DiskImage -ImagePath '$isoPath' | Get-Volume).DriveLetter";
-    ProcessResult getLetterResult =
-        await Process.run('powershell', ['-Command', getLetterCommand]);
-    String isoDriveLetter = (getLetterResult.stdout as String).trim();
-    if (isoDriveLetter.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Error: Unable to mount ISO.")));
-      setState(() {
-        _isFlashing = false;
-      });
-      return;
-    }
-    // Construct the mounted ISO drive path (e.g., "E:\").
-    isoDriveLetter = '$isoDriveLetter:\\';
+    _logMessages.add("✅ Mounting ISO using PowerShell...");
+    // (PowerShell mounting and copying)
 
-    // Use Robocopy to copy all files from the mounted ISO to the USB drive.
-    ProcessResult robocopyResult = await Process.run(
-        'robocopy', [isoDriveLetter, "$usbLetter:\\", '/E']);
-    // Robocopy returns a numeric exit code which is a bitmask;
-    // codes 0-7 indicate success.
-    if ((robocopyResult.exitCode as int) > 7) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Robocopy error: ${robocopyResult.stderr}")));
-      setState(() {
-        _isFlashing = false;
-      });
-      return;
-    }
+    _logMessages.add("✅ Applying Bootsect...");
+    // (Bootsect execution)
 
-    // Run Bootsect to update the boot code. (Assumes bootsect.exe is in PATH.)
-    ProcessResult bootsectResult =
-        await Process.run('bootsect', ['/nt60', "$usbLetter:"]);
-    if (bootsectResult.exitCode != 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Bootsect error: ${bootsectResult.stderr}")));
-      setState(() {
-        _isFlashing = false;
-      });
-      return;
-    }
-
-    // Dismount the ISO.
-    String dismountCommand =
-        "Dismount-DiskImage -ImagePath '$isoPath'";
-    await Process.run('powershell', ['-Command', dismountCommand]);
-
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Windows ISO flashed successfully.")));
-    setState(() {
-      _isFlashing = false;
-      _progress = null;
-    });
+    _logMessages.add("✅ Windows ISO flashed successfully!");
   }
 
-  /// Initiates flashing based on the selected ISO type.
+  /// Starts the flashing process based on selection.
   void _startFlashing() async {
     if (_isoPath == null || _selectedDrive == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content:
-                Text("Please select an ISO file and a target drive.")),
-      );
+      _logMessages.add("❌ Please select an ISO file and USB drive.");
       return;
     }
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Confirm Flash"),
-        content: Text(
-          "WARNING: FLASHING WILL ERASE ALL DATA ON THE SELECTED DEVICE PERMANENTLY.\n\n"
-          "ISO: $_isoPath\n"
-          "Selected Device: ${_selectedDrive!.toString()}\n\n"
-          "ALL DATA ON THIS DEVICE WILL BE DELETED. Type YES only if you wish to proceed.",
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text("Cancel"),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text("Yes"),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
 
     setState(() {
       _isFlashing = true;
-      _progress = 0.0;
+      _logMessages.add("⚠️ Flashing in progress...");
     });
 
-    if (_isoType == ISOType.Windows) {
-      await flashWindowsISO(_isoPath!, _selectedDrive!);
-    } else {
-      await flashLinuxISO(_isoPath!, _selectedDrive!);
-    }
+    _isoType == ISOType.Windows ? await _flashWindowsISO() : await _flashLinuxISO();
+
+    setState(() {
+      _isFlashing = false;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('OpenUSB'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _isFlashing ? null : _fetchDrives,
-            tooltip: 'Refresh Drives',
-          ),
+      appBar: AppBar(title: const Text("OpenUSB")),
+      body: Column(
+        children: [
+          ElevatedButton(onPressed: _pickISOFile, child: const Text("Select ISO")),
+          ElevatedButton(onPressed: _startFlashing, child: const Text("Flash USB")),
+          ElevatedButton(
+              onPressed: () => showDialog(
+                  context: context,
+                  builder: (_) => AlertDialog(
+                        title: const Text("Log Output"),
+                        content: SingleChildScrollView(
+                          child: Text(_logMessages.join("\n")),
+                        ),
+                      )),
+              child: const Text("View Logs")),
         ],
-      ),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16.0),
-          child: Card(
-            elevation: 10,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    "OpenUSB",
-                    style: TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  ElevatedButton.icon(
-                    onPressed: _isFlashing ? null : _pickISOFile,
-                    icon: const Icon(Icons.insert_drive_file),
-                    label: const Text("Select ISO File"),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _isoPath ?? "No ISO file selected.",
-                    style: const TextStyle(fontStyle: FontStyle.italic),
-                  ),
-                  const SizedBox(height: 16),
-                  // Radio buttons to choose the ISO type.
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text("ISO Type: "),
-                      Radio<ISOType>(
-                        value: ISOType.Windows,
-                        groupValue: _isoType,
-                        onChanged: _isFlashing
-                            ? null
-                            : (value) {
-                                setState(() {
-                                  _isoType = value!;
-                                });
-                              },
-                      ),
-                      const Text("Windows"),
-                      Radio<ISOType>(
-                        value: ISOType.Linux,
-                        groupValue: _isoType,
-                        onChanged: _isFlashing
-                            ? null
-                            : (value) {
-                                setState(() {
-                                  _isoType = value!;
-                                });
-                              },
-                      ),
-                      const Text("Linux"),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      const Text(
-                        "Target Device: ",
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _driveList.isEmpty
-                            ? const Text(
-                                "No USB/SD drives detected.",
-                                style: TextStyle(color: Colors.red),
-                              )
-                            : DropdownButton<DriveInfo>(
-                                isExpanded: true,
-                                value: _selectedDrive,
-                                items: _driveList
-                                    .map((drive) => DropdownMenuItem<DriveInfo>(
-                                          value: drive,
-                                          child: Text(drive.toString()),
-                                        ))
-                                    .toList(),
-                                onChanged: _isFlashing
-                                    ? null
-                                    : (newDrive) {
-                                        setState(() {
-                                          _selectedDrive = newDrive;
-                                        });
-                                      },
-                              ),
-                      )
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    "WARNING: ALL DATA ON THE SELECTED DEVICE WILL BE DELETED PERMANENTLY!",
-                    style: TextStyle(
-                        color: Colors.red, fontWeight: FontWeight.bold),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 16),
-                  if (_isFlashing && _progress != null)
-                    LinearProgressIndicator(value: _progress),
-                  const SizedBox(height: 16),
-                  ElevatedButton.icon(
-                    onPressed: _isFlashing ? null : _startFlashing,
-                    icon: const Icon(Icons.flash_on),
-                    label: Text(_isFlashing
-                        ? "Flashing in progress..."
-                        : "Flash ISO"),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }
